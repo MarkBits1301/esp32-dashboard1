@@ -22,6 +22,7 @@ const App = () => {
   const [endDate, setEndDate] = useState(null);
   const [darkMode, setDarkMode] = useState(false);
   const [relayOn, setRelayOn] = useState(false);
+  const [lastUpdate, setLastUpdate] = useState('N/A');
 
   // Fetch initial sensor and relay state
   useEffect(() => {
@@ -29,49 +30,123 @@ const App = () => {
       const { data: rows, error: sensorError } = await supabase
         .from('sensor_data')
         .select('temperature, humidity, inserted_at')
-        .order('inserted_at', { ascending: true });
-      if (!sensorError) setData(rows || []);
+        .order('inserted_at', { ascending: true })
+        .limit(100); // Limit to prevent loading too much data
+      
+      if (!sensorError && rows && rows.length > 0) {
+        setData(rows);
+        setLastUpdate(new Date().toLocaleTimeString());
+      } else if (sensorError) {
+        console.error('Error fetching sensor data:', sensorError);
+      }
 
       const { data: relayRows, error: relayError } = await supabase
         .from('relay_control')
         .select('state')
         .eq('id', 1)
         .single();
-      if (!relayError && relayRows) setRelayOn(relayRows.state);
+      
+      if (!relayError && relayRows) {
+        setRelayOn(relayRows.state);
+      } else if (relayError) {
+        console.error('Error fetching relay state:', relayError);
+      }
     }
+    
     fetchData();
 
+    // Set up realtime subscription
     const channel = supabase
       .channel('realtime')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'sensor_data' }, payload => {
-        setData(prev => [...prev.slice(-59), payload.new]);
+        console.log('New sensor data received:', payload.new);
+        setData(prev => {
+          // Keep latest 100 entries to prevent performance issues
+          const newData = [...prev, payload.new];
+          if (newData.length > 100) {
+            return newData.slice(-100);
+          }
+          return newData;
+        });
+        setLastUpdate(new Date().toLocaleTimeString());
       })
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'relay_control' }, payload => {
+        console.log('Relay state updated:', payload.new);
         setRelayOn(payload.new.state);
       })
-      .subscribe();
+      .subscribe(status => {
+        console.log('Supabase subscription status:', status);
+      });
 
-    return () => supabase.removeChannel(channel);
+    // Clean up subscription on unmount
+    return () => {
+      console.log('Cleaning up Supabase channel');
+      supabase.removeChannel(channel);
+    };
   }, []);
 
-  // Force update every second
+  // Poll for updates every 30 seconds as a fallback for when realtime fails
   useEffect(() => {
-    const interval = setInterval(() => setData(prev => [...prev]), 1000);
-    return () => clearInterval(interval);
-  }, []);
+    const pollInterval = setInterval(async () => {
+      console.log('Polling for updates...');
+      const { data: latestData, error } = await supabase
+        .from('sensor_data')
+        .select('temperature, humidity, inserted_at')
+        .order('inserted_at', { ascending: false })
+        .limit(1);
+      
+      if (!error && latestData && latestData.length > 0) {
+        const latestTimestamp = new Date(latestData[0].inserted_at).getTime();
+        const currentDataLatest = data.length > 0 ? new Date(data[data.length - 1].inserted_at).getTime() : 0;
+        
+        // If there's newer data than what we have, refresh all data
+        if (latestTimestamp > currentDataLatest) {
+          console.log('Found newer data, refreshing...');
+          const { data: refreshedData } = await supabase
+            .from('sensor_data')
+            .select('temperature, humidity, inserted_at')
+            .order('inserted_at', { ascending: true })
+            .limit(100);
+          
+          if (refreshedData && refreshedData.length > 0) {
+            setData(refreshedData);
+            setLastUpdate(new Date().toLocaleTimeString());
+          }
+        }
+      }
+    }, 30000); // Poll every 30 seconds
+
+    return () => clearInterval(pollInterval);
+  }, [data]);
 
   // Toggle relay
   const toggleRelay = async () => {
     const newState = !relayOn;
     setRelayOn(newState);
-    await supabase
+    const { error } = await supabase
       .from('relay_control')
       .update({ state: newState })
       .eq('id', 1);
+    
+    if (error) {
+      console.error('Error updating relay state:', error);
+      // Revert UI state if update failed
+      setRelayOn(!newState);
+    }
   };
+
+  // Force UI refresh every 5s
+  useEffect(() => {
+    const interval = setInterval(() => {
+      // This will trigger a re-render without changing any data
+      setLastUpdate(new Date().toLocaleTimeString());
+    }, 5000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Filter data
   const filtered = data.filter(item => {
+    if (!item || !item.inserted_at) return false;
     const ts = new Date(item.inserted_at);
     if (startDate && ts < startDate) return false;
     if (endDate && ts > endDate) return false;
@@ -79,9 +154,13 @@ const App = () => {
   });
 
   // Metrics
-  const latest = filtered[filtered.length - 1] || {};
-  const avgTemp = (filtered.reduce((sum, d) => sum + d.temperature, 0) / (filtered.length || 1)).toFixed(1);
-  const avgHum = (filtered.reduce((sum, d) => sum + d.humidity, 0) / (filtered.length || 1)).toFixed(1);
+  const latest = filtered.length > 0 ? filtered[filtered.length - 1] : {};
+  const avgTemp = filtered.length > 0
+    ? (filtered.reduce((sum, d) => sum + (d.temperature || 0), 0) / filtered.length).toFixed(1)
+    : '--';
+  const avgHum = filtered.length > 0
+    ? (filtered.reduce((sum, d) => sum + (d.humidity || 0), 0) / filtered.length).toFixed(1)
+    : '--';
 
   // Theme class to apply to html element
   useEffect(() => {
@@ -140,8 +219,30 @@ const App = () => {
         <div className="mb-6 p-4 rounded-lg bg-white dark:bg-gray-800 shadow-sm border border-gray-200 dark:border-gray-700 flex justify-between items-center">
           <div className="flex items-center">
             <Clock size={20} className={darkMode ? 'text-blue-300' : 'text-blue-600'} />
-            <span className="ml-2 font-medium">Last update: {latest.inserted_at ? new Date(latest.inserted_at).toLocaleTimeString() : 'N/A'}</span>
+            <span className="ml-2 font-medium">Last update: {lastUpdate}</span>
           </div>
+          
+          <button 
+            onClick={async () => {
+              const { data: rows, error } = await supabase
+                .from('sensor_data')
+                .select('temperature, humidity, inserted_at')
+                .order('inserted_at', { ascending: true })
+                .limit(100);
+              
+              if (!error && rows) {
+                setData(rows);
+                setLastUpdate(new Date().toLocaleTimeString());
+              }
+            }}
+            className={`px-3 py-1.5 rounded text-sm mr-4 ${
+              darkMode 
+                ? 'bg-gray-700 hover:bg-gray-600 text-gray-200' 
+                : 'bg-gray-100 hover:bg-gray-200 text-gray-800'
+            }`}
+          >
+            Refresh Data
+          </button>
           
           <label className="flex items-center space-x-3 cursor-pointer">
             <Power size={20} className={relayOn ? 'text-green-500' : darkMode ? 'text-gray-400' : 'text-gray-500'} />
@@ -220,106 +321,112 @@ const App = () => {
             </span>
           </h2>
           
-          <div className="h-96">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart 
-                data={filtered.length ? filtered : data} 
-                margin={{ top: 10, right: 10, left: 0, bottom: 20 }}
-              >
-                <defs>
-                  <linearGradient id="colorTemp" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#c084fc" stopOpacity={0.6} />
-                    <stop offset="95%" stopColor="#c084fc" stopOpacity={0.1} />
-                  </linearGradient>
-                  <linearGradient id="colorHum" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#60a5fa" stopOpacity={0.6} />
-                    <stop offset="95%" stopColor="#60a5fa" stopOpacity={0.1} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid 
-                  strokeDasharray="3 3" 
-                  stroke={darkMode ? '#333' : '#f0f0f0'} 
-                  vertical={false} 
-                />
-                <XAxis 
-                  dataKey="inserted_at" 
-                  tickFormatter={t => new Date(t).toLocaleTimeString()} 
-                  stroke={darkMode ? '#aaa' : '#888'}
-                  tick={{ fontSize: 12 }}
-                  dy={10}
-                />
-                <YAxis 
-                  stroke={darkMode ? '#aaa' : '#888'} 
-                  tick={{ fontSize: 12 }}
-                  width={40}
-                />
-                <Tooltip 
-                  contentStyle={{ 
-                    backgroundColor: darkMode ? '#333' : '#fff',
-                    border: `1px solid ${darkMode ? '#555' : '#ddd'}`,
-                    borderRadius: '4px',
-                    color: darkMode ? '#eee' : '#333',
-                    boxShadow: '0 2px 8px rgba(0,0,0,0.15)'
-                  }}
-                  labelFormatter={value => new Date(value).toLocaleString()}
-                  formatter={(value, name) => [
-                    value.toFixed(1) + (name === 'temperature' ? '°C' : '%'), 
-                    name === 'temperature' ? 'Temperature' : 'Humidity'
-                  ]}
-                />
-                <ReferenceLine 
-                  y={30} 
-                  stroke={darkMode ? '#ff6b6b99' : '#ff7f7f'} 
-                  strokeDasharray="3 3" 
-                  label={{ 
-                    value: 'Threshold', 
-                    position: 'insideBottomRight',
-                    fill: darkMode ? '#ff6b6b' : '#ff7f7f',
-                    fontSize: 12
-                  }} 
-                />
-                <Area 
-                  type="monotone" 
-                  dataKey="temperature" 
-                  name="Temperature"
-                  stroke="#c084fc" 
-                  strokeWidth={2}
-                  fill="url(#colorTemp)" 
-                  dot={false}
-                  activeDot={{ r: 6, strokeWidth: 0 }}
-                />
-                <Area 
-                  type="monotone" 
-                  dataKey="humidity" 
-                  name="Humidity"
-                  stroke="#60a5fa" 
-                  strokeWidth={2}
-                  fill="url(#colorHum)" 
-                  dot={false}
-                  activeDot={{ r: 6, strokeWidth: 0 }}
-                />
-                <Brush 
-                  dataKey="inserted_at" 
-                  height={30} 
-                  stroke={darkMode ? '#666' : '#ddd'}
-                  fill={darkMode ? '#333' : '#f9f9f9'}
-                  tickFormatter={t => new Date(t).toLocaleTimeString()} 
-                  startIndex={Math.max(0, data.length - 30)}
-                />
-                <Legend 
-                  iconType="circle" 
-                  verticalAlign="top"
-                  wrapperStyle={{ paddingBottom: '10px' }}
-                />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
+          {data.length === 0 ? (
+            <div className="h-96 flex items-center justify-center text-gray-500 dark:text-gray-400">
+              No sensor data available. Check your connection to the sensor or database.
+            </div>
+          ) : (
+            <div className="h-96">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart 
+                  data={filtered.length ? filtered : data} 
+                  margin={{ top: 10, right: 10, left: 0, bottom: 20 }}
+                >
+                  <defs>
+                    <linearGradient id="colorTemp" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#c084fc" stopOpacity={0.6} />
+                      <stop offset="95%" stopColor="#c084fc" stopOpacity={0.1} />
+                    </linearGradient>
+                    <linearGradient id="colorHum" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#60a5fa" stopOpacity={0.6} />
+                      <stop offset="95%" stopColor="#60a5fa" stopOpacity={0.1} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid 
+                    strokeDasharray="3 3" 
+                    stroke={darkMode ? '#333' : '#f0f0f0'} 
+                    vertical={false} 
+                  />
+                  <XAxis 
+                    dataKey="inserted_at" 
+                    tickFormatter={t => new Date(t).toLocaleTimeString()} 
+                    stroke={darkMode ? '#aaa' : '#888'}
+                    tick={{ fontSize: 12 }}
+                    dy={10}
+                  />
+                  <YAxis 
+                    stroke={darkMode ? '#aaa' : '#888'} 
+                    tick={{ fontSize: 12 }}
+                    width={40}
+                  />
+                  <Tooltip 
+                    contentStyle={{ 
+                      backgroundColor: darkMode ? '#333' : '#fff',
+                      border: `1px solid ${darkMode ? '#555' : '#ddd'}`,
+                      borderRadius: '4px',
+                      color: darkMode ? '#eee' : '#333',
+                      boxShadow: '0 2px 8px rgba(0,0,0,0.15)'
+                    }}
+                    labelFormatter={value => new Date(value).toLocaleString()}
+                    formatter={(value, name) => [
+                      value.toFixed(1) + (name === 'temperature' ? '°C' : '%'), 
+                      name === 'temperature' ? 'Temperature' : 'Humidity'
+                    ]}
+                  />
+                  <ReferenceLine 
+                    y={30} 
+                    stroke={darkMode ? '#ff6b6b99' : '#ff7f7f'} 
+                    strokeDasharray="3 3" 
+                    label={{ 
+                      value: 'Threshold', 
+                      position: 'insideBottomRight',
+                      fill: darkMode ? '#ff6b6b' : '#ff7f7f',
+                      fontSize: 12
+                    }} 
+                  />
+                  <Area 
+                    type="monotone" 
+                    dataKey="temperature" 
+                    name="Temperature"
+                    stroke="#c084fc" 
+                    strokeWidth={2}
+                    fill="url(#colorTemp)" 
+                    dot={false}
+                    activeDot={{ r: 6, strokeWidth: 0 }}
+                  />
+                  <Area 
+                    type="monotone" 
+                    dataKey="humidity" 
+                    name="Humidity"
+                    stroke="#60a5fa" 
+                    strokeWidth={2}
+                    fill="url(#colorHum)" 
+                    dot={false}
+                    activeDot={{ r: 6, strokeWidth: 0 }}
+                  />
+                  <Brush 
+                    dataKey="inserted_at" 
+                    height={30} 
+                    stroke={darkMode ? '#666' : '#ddd'}
+                    fill={darkMode ? '#333' : '#f9f9f9'}
+                    tickFormatter={t => new Date(t).toLocaleTimeString()} 
+                    startIndex={Math.max(0, data.length - 30)}
+                  />
+                  <Legend 
+                    iconType="circle" 
+                    verticalAlign="top"
+                    wrapperStyle={{ paddingBottom: '10px' }}
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          )}
         </div>
       </main>
       
       {/* Footer */}
       <footer className={`mt-8 py-4 text-center text-sm ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-        Sensor Dashboard • Data updates in real-time
+        Sensor Dashboard • Data updates in real-time • Last refresh: {lastUpdate}
       </footer>
     </div>
   );
