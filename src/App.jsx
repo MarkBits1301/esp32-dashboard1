@@ -156,12 +156,12 @@ const App = () => {
               />
               <label 
                 htmlFor="relay-toggle" 
-                className={`block w-12 h-6 rounded-full transition-colors duration-300 ${
+                className={`block w-9 h-5 border-[1px] border-black rounded-full transition-colors duration-300 ${
                   relayOn ? 'bg-green-500' : darkMode ? 'bg-gray-600' : 'bg-gray-300'
                 }`}
               >
-                <span className={`block w-4 h-4 mt-1 ml-1 bg-white rounded-full transition-transform duration-300 ${
-                  relayOn ? 'transform translate-x-6' : ''
+                <span className={`block w-4 h-4 mt-1 relative -top-[3px] bg-white rounded-full transition-transform duration-300 ${
+                  relayOn ? 'transform translate-x-4' : ''
                 }`}></span>
               </label>
             </div>
