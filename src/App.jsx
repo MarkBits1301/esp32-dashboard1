@@ -12,7 +12,6 @@ import {
   Tooltip,
   Legend,
   ReferenceLine,
-  Brush,
 } from 'recharts';
 import { Sun, Moon, Calendar, Thermometer, Droplets, Clock, Power } from 'lucide-react';
 
@@ -21,35 +20,66 @@ const App = () => {
   const [startDate, setStartDate] = useState(null);
   const [endDate, setEndDate] = useState(null);
   const [darkMode, setDarkMode] = useState(false);
-  const [relayOn, setRelayOn] = useState(false);
+  const [relay1On, setRelay1On] = useState(false);
+  const [relay2On, setRelay2On] = useState(false);
   const [lastUpdate, setLastUpdate] = useState('N/A');
 
-  // Fetch initial sensor and relay state
+  // Fetch initial sensor and relay states
   useEffect(() => {
     async function fetchData() {
+      // Get the most recent data first
       const { data: rows, error: sensorError } = await supabase
         .from('sensor_data')
         .select('temperature, humidity, inserted_at')
-        .order('inserted_at', { ascending: true })
+        .order('inserted_at', { ascending: false })
         .limit(100); // Limit to prevent loading too much data
       
       if (!sensorError && rows && rows.length > 0) {
-        setData(rows);
+        // Reverse to get chronological order for charting
+        setData(rows.reverse());
         setLastUpdate(new Date().toLocaleTimeString());
       } else if (sensorError) {
         console.error('Error fetching sensor data:', sensorError);
       }
 
-      const { data: relayRows, error: relayError } = await supabase
+      // Fetch relay 1 state
+      const { data: relay1Rows, error: relay1Error } = await supabase
         .from('relay_control')
         .select('state')
         .eq('id', 1)
         .single();
       
-      if (!relayError && relayRows) {
-        setRelayOn(relayRows.state);
-      } else if (relayError) {
-        console.error('Error fetching relay state:', relayError);
+      if (!relay1Error && relay1Rows) {
+        setRelay1On(relay1Rows.state);
+      } else if (relay1Error) {
+        console.error('Error fetching relay 1 state:', relay1Error);
+        // If the relay doesn't exist, create it
+        const { error: createError } = await supabase
+          .from('relay_control')
+          .insert([{ id: 1, state: false }]);
+        if (createError) {
+          console.error('Error creating relay 1:', createError);
+        }
+      }
+
+      // Fetch relay 2 state
+      const { data: relay2Rows, error: relay2Error } = await supabase
+        .from('relay_control')
+        .select('state')
+        .eq('id', 2)
+        .single();
+      
+      if (!relay2Error && relay2Rows) {
+        setRelay2On(relay2Rows.state);
+      } else if (relay2Error) {
+        console.error('Error fetching relay 2 state:', relay2Error);
+        // If the relay doesn't exist, create it
+        const { error: createError } = await supabase
+          .from('relay_control')
+          .insert([{ id: 2, state: false }]);
+        if (createError) {
+          console.error('Error creating relay 2:', createError);
+        }
       }
     }
     
@@ -72,7 +102,11 @@ const App = () => {
       })
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'relay_control' }, payload => {
         console.log('Relay state updated:', payload.new);
-        setRelayOn(payload.new.state);
+        if (payload.new.id === 1) {
+          setRelay1On(payload.new.state);
+        } else if (payload.new.id === 2) {
+          setRelay2On(payload.new.state);
+        }
       })
       .subscribe(status => {
         console.log('Supabase subscription status:', status);
@@ -102,36 +136,75 @@ const App = () => {
         // If there's newer data than what we have, refresh all data
         if (latestTimestamp > currentDataLatest) {
           console.log('Found newer data, refreshing...');
-          const { data: refreshedData } = await supabase
+          const { data: refreshedData, error } = await supabase
             .from('sensor_data')
             .select('temperature, humidity, inserted_at')
-            .order('inserted_at', { ascending: true })
+            .order('inserted_at', { ascending: false })
             .limit(100);
           
-          if (refreshedData && refreshedData.length > 0) {
-            setData(refreshedData);
+          if (!error && refreshedData && refreshedData.length > 0) {
+            // Reverse to get chronological order for charting
+            setData(refreshedData.reverse());
             setLastUpdate(new Date().toLocaleTimeString());
           }
         }
       }
-    }, 30000); // Poll every 30 seconds
+      
+      // Also poll for relay states to ensure they're in sync
+      const { data: relay1Data, error: relay1Error } = await supabase
+        .from('relay_control')
+        .select('state')
+        .eq('id', 1)
+        .single();
+        
+      if (!relay1Error && relay1Data) {
+        setRelay1On(relay1Data.state);
+      }
+      
+      const { data: relay2Data, error: relay2Error } = await supabase
+        .from('relay_control')
+        .select('state')
+        .eq('id', 2)
+        .single();
+        
+      if (!relay2Error && relay2Data) {
+        setRelay2On(relay2Data.state);
+      }
+      
+    }, 15000); // Poll every 15 seconds for more responsiveness
 
     return () => clearInterval(pollInterval);
   }, [data]);
 
-  // Toggle relay
-  const toggleRelay = async () => {
-    const newState = !relayOn;
-    setRelayOn(newState);
+  // Toggle relay 1
+  const toggleRelay1 = async () => {
+    const newState = !relay1On;
+    setRelay1On(newState);
     const { error } = await supabase
       .from('relay_control')
       .update({ state: newState })
       .eq('id', 1);
     
     if (error) {
-      console.error('Error updating relay state:', error);
+      console.error('Error updating relay 1 state:', error);
       // Revert UI state if update failed
-      setRelayOn(!newState);
+      setRelay1On(!newState);
+    }
+  };
+
+  // Toggle relay 2
+  const toggleRelay2 = async () => {
+    const newState = !relay2On;
+    setRelay2On(newState);
+    const { error } = await supabase
+      .from('relay_control')
+      .update({ state: newState })
+      .eq('id', 2);
+    
+    if (error) {
+      console.error('Error updating relay 2 state:', error);
+      // Revert UI state if update failed
+      setRelay2On(!newState);
     }
   };
 
@@ -144,14 +217,23 @@ const App = () => {
     return () => clearInterval(interval);
   }, []);
 
-  // Filter data
-  const filtered = data.filter(item => {
-    if (!item || !item.inserted_at) return false;
-    const ts = new Date(item.inserted_at);
-    if (startDate && ts < startDate) return false;
-    if (endDate && ts > endDate) return false;
-    return true;
-  });
+  // Take only the last 50 data points for real-time view, unless filtered by date
+  const getDisplayData = () => {
+    // If date filter is applied, use the filtered data
+    if (startDate || endDate) {
+      return data.filter(item => {
+        if (!item || !item.inserted_at) return false;
+        const ts = new Date(item.inserted_at);
+        if (startDate && ts < startDate) return false;
+        if (endDate && ts > endDate) return false;
+        return true;
+      });
+    }
+    // Otherwise, just show the most recent 50 entries for real-time view
+    return data.slice(-50);
+  };
+  
+  const filtered = getDisplayData();
 
   // Metrics
   const latest = filtered.length > 0 ? filtered[filtered.length - 1] : {};
@@ -201,13 +283,43 @@ const App = () => {
                 selectsStart
                 startDate={startDate}
                 endDate={endDate}
-                placeholderText="Filter by date"
+                placeholderText="Start date"
                 className={`border rounded px-3 py-1.5 text-sm ${
                   darkMode 
                     ? 'bg-gray-800 text-gray-200 border-gray-700' 
                     : 'bg-white border-gray-300'
                 }`}
               />
+              <span className="text-xs">to</span>
+              <DatePicker
+                selected={endDate}
+                onChange={date => setEndDate(date)}
+                selectsEnd
+                startDate={startDate}
+                endDate={endDate}
+                minDate={startDate}
+                placeholderText="End date"
+                className={`border rounded px-3 py-1.5 text-sm ${
+                  darkMode 
+                    ? 'bg-gray-800 text-gray-200 border-gray-700' 
+                    : 'bg-white border-gray-300'
+                }`}
+              />
+              {(startDate || endDate) && (
+                <button 
+                  onClick={() => {
+                    setStartDate(null);
+                    setEndDate(null);
+                  }}
+                  className={`px-2 py-1 rounded text-xs ${
+                    darkMode 
+                      ? 'bg-gray-700 hover:bg-gray-600 text-gray-200' 
+                      : 'bg-gray-100 hover:bg-gray-200 text-gray-800'
+                  }`}
+                >
+                  Clear
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -216,8 +328,8 @@ const App = () => {
       {/* Main content */}
       <main className="container mx-auto px-4 py-6">
         {/* Control Panel */}
-        <div className="mb-6 p-4 rounded-lg bg-white dark:bg-gray-800 shadow-sm border border-gray-200 dark:border-gray-700 flex justify-between items-center">
-          <div className="flex items-center">
+        <div className="mb-6 p-4 rounded-lg bg-white dark:bg-gray-800 shadow-sm border border-gray-200 dark:border-gray-700 flex justify-between items-center flex-wrap">
+          <div className="flex items-center mb-2 sm:mb-0">
             <Clock size={20} className={darkMode ? 'text-blue-300' : 'text-blue-600'} />
             <span className="ml-2 font-medium">Last update: {lastUpdate}</span>
           </div>
@@ -227,12 +339,33 @@ const App = () => {
               const { data: rows, error } = await supabase
                 .from('sensor_data')
                 .select('temperature, humidity, inserted_at')
-                .order('inserted_at', { ascending: true })
+                .order('inserted_at', { ascending: false })
                 .limit(100);
               
               if (!error && rows) {
-                setData(rows);
+                setData(rows.reverse());  // Reverse to get chronological order
                 setLastUpdate(new Date().toLocaleTimeString());
+              }
+              
+              // Also refresh relay states
+              const { data: relay1Data } = await supabase
+                .from('relay_control')
+                .select('state')
+                .eq('id', 1)
+                .single();
+                
+              if (relay1Data) {
+                setRelay1On(relay1Data.state);
+              }
+              
+              const { data: relay2Data } = await supabase
+                .from('relay_control')
+                .select('state')
+                .eq('id', 2)
+                .single();
+                
+              if (relay2Data) {
+                setRelay2On(relay2Data.state);
               }
             }}
             className={`px-3 py-1.5 rounded text-sm mr-4 ${
@@ -244,29 +377,55 @@ const App = () => {
             Refresh Data
           </button>
           
-          <label className="flex items-center space-x-3 cursor-pointer">
-            <Power size={20} className={relayOn ? 'text-green-500' : darkMode ? 'text-gray-400' : 'text-gray-500'} />
-            <span className="font-medium">Control Relay</span>
-            <div className="relative">
-              <input
-                type="checkbox"
-                checked={relayOn}
-                onChange={toggleRelay}
-                className="toggle-checkbox sr-only"
-                id="relay-toggle"
-              />
-              <label 
-                htmlFor="relay-toggle" 
-                className={`block w-9 h-5 border-[1px] border-black rounded-full transition-colors duration-300 ${
-                  relayOn ? 'bg-green-500' : darkMode ? 'bg-gray-600' : 'bg-gray-300'
-                }`}
-              >
-                <span className={`block w-4 h-4 mt-1 relative -top-[3px] bg-white rounded-full transition-transform duration-300 ${
-                  relayOn ? 'transform translate-x-4' : ''
-                }`}></span>
-              </label>
-            </div>
-          </label>
+          <div className="flex items-center space-x-4">
+            <label className="flex items-center space-x-3 cursor-pointer">
+              <Power size={20} className={relay1On ? 'text-green-500' : darkMode ? 'text-gray-400' : 'text-gray-500'} />
+              <span className="font-medium">Relay 1</span>
+              <div className="relative">
+                <input
+                  type="checkbox"
+                  checked={relay1On}
+                  onChange={toggleRelay1}
+                  className="toggle-checkbox sr-only"
+                  id="relay1-toggle"
+                />
+                <label 
+                  htmlFor="relay1-toggle" 
+                  className={`block w-9 h-5 border-[1px] border-black rounded-full transition-colors duration-300 ${
+                    relay1On ? 'bg-green-500' : darkMode ? 'bg-gray-600' : 'bg-gray-300'
+                  }`}
+                >
+                  <span className={`block w-4 h-4 mt-1 relative -top-[3px] bg-white rounded-full transition-transform duration-300 ${
+                    relay1On ? 'transform translate-x-4' : ''
+                  }`}></span>
+                </label>
+              </div>
+            </label>
+            
+            <label className="flex items-center space-x-3 cursor-pointer">
+              <Power size={20} className={relay2On ? 'text-green-500' : darkMode ? 'text-gray-400' : 'text-gray-500'} />
+              <span className="font-medium">Relay 2</span>
+              <div className="relative">
+                <input
+                  type="checkbox"
+                  checked={relay2On}
+                  onChange={toggleRelay2}
+                  className="toggle-checkbox sr-only"
+                  id="relay2-toggle"
+                />
+                <label 
+                  htmlFor="relay2-toggle" 
+                  className={`block w-9 h-5 border-[1px] border-black rounded-full transition-colors duration-300 ${
+                    relay2On ? 'bg-green-500' : darkMode ? 'bg-gray-600' : 'bg-gray-300'
+                  }`}
+                >
+                  <span className={`block w-4 h-4 mt-1 relative -top-[3px] bg-white rounded-full transition-transform duration-300 ${
+                    relay2On ? 'transform translate-x-4' : ''
+                  }`}></span>
+                </label>
+              </div>
+            </label>
+          </div>
         </div>
 
         {/* Cards */}
@@ -310,14 +469,21 @@ const App = () => {
 
         {/* Chart */}
         <div className="p-4 rounded-lg shadow-sm bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700">
-          <h2 className="text-lg font-medium mb-4 flex items-center">
+          <h2 className="text-lg font-medium mb-4 flex items-center flex-wrap gap-2">
             <span className="mr-2">Sensor Data Trends</span>
             <span className={`text-xs px-2 py-1 rounded ${
-              relayOn 
+              relay1On 
                 ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300' 
                 : 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300'
             }`}>
-              Relay: {relayOn ? 'ON' : 'OFF'}
+              Relay 1: {relay1On ? 'ON' : 'OFF'}
+            </span>
+            <span className={`text-xs px-2 py-1 rounded ${
+              relay2On 
+                ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300' 
+                : 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300'
+            }`}>
+              Relay 2: {relay2On ? 'ON' : 'OFF'}
             </span>
           </h2>
           
@@ -349,9 +515,20 @@ const App = () => {
                   />
                   <XAxis 
                     dataKey="inserted_at" 
-                    tickFormatter={t => new Date(t).toLocaleTimeString()} 
+                    tickFormatter={t => {
+                      const date = new Date(t);
+                      // Show date and time if filtering by date
+                      if (startDate || endDate) {
+                        return `${date.toLocaleDateString()} ${date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}`;
+                      }
+                      // Show only time for real-time view
+                      return date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                    }}
                     stroke={darkMode ? '#aaa' : '#888'}
-                    tick={{ fontSize: 12 }}
+                    tick={{ fontSize: 11 }}
+                    angle={-25}
+                    textAnchor="end"
+                    height={50}
                     dy={10}
                   />
                   <YAxis 
@@ -360,6 +537,7 @@ const App = () => {
                     width={40}
                   />
                   <Tooltip 
+                    isAnimationActive={false}
                     contentStyle={{ 
                       backgroundColor: darkMode ? '#333' : '#fff',
                       border: `1px solid ${darkMode ? '#555' : '#ddd'}`,
@@ -367,7 +545,10 @@ const App = () => {
                       color: darkMode ? '#eee' : '#333',
                       boxShadow: '0 2px 8px rgba(0,0,0,0.15)'
                     }}
-                    labelFormatter={value => new Date(value).toLocaleString()}
+                    labelFormatter={value => {
+                      const date = new Date(value);
+                      return `${date.toLocaleDateString()} ${date.toLocaleTimeString()}`;
+                    }}
                     formatter={(value, name) => [
                       value.toFixed(1) + (name === 'temperature' ? '°C' : '%'), 
                       name === 'temperature' ? 'Temperature' : 'Humidity'
@@ -391,8 +572,9 @@ const App = () => {
                     stroke="#c084fc" 
                     strokeWidth={2}
                     fill="url(#colorTemp)" 
-                    dot={false}
+                    dot={filtered.length < 10}
                     activeDot={{ r: 6, strokeWidth: 0 }}
+                    isAnimationActive={false}
                   />
                   <Area 
                     type="monotone" 
@@ -401,16 +583,9 @@ const App = () => {
                     stroke="#60a5fa" 
                     strokeWidth={2}
                     fill="url(#colorHum)" 
-                    dot={false}
+                    dot={filtered.length < 10}
                     activeDot={{ r: 6, strokeWidth: 0 }}
-                  />
-                  <Brush 
-                    dataKey="inserted_at" 
-                    height={30} 
-                    stroke={darkMode ? '#666' : '#ddd'}
-                    fill={darkMode ? '#333' : '#f9f9f9'}
-                    tickFormatter={t => new Date(t).toLocaleTimeString()} 
-                    startIndex={Math.max(0, data.length - 30)}
+                    isAnimationActive={false}
                   />
                   <Legend 
                     iconType="circle" 
